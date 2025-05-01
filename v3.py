@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import cv2
 import numpy as np
@@ -7,11 +6,10 @@ from collections import defaultdict, deque
 from ultralytics import YOLO
 from sklearn.cluster import KMeans
 import math
-
-# ------------------------ SORT Tracker (Built-in) ------------------------
-
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
+
+# -------------------- SORT Tracker Implementation --------------------
 
 def iou(bb_test, bb_gt):
     xx1 = np.maximum(bb_test[0], bb_gt[0])
@@ -21,13 +19,12 @@ def iou(bb_test, bb_gt):
     w = np.maximum(0., xx2 - xx1)
     h = np.maximum(0., yy2 - yy1)
     wh = w * h
-    o = wh / ((bb_test[2]-bb_test[0])*(bb_test[3]-bb_test[1]) + 
+    o = wh / ((bb_test[2]-bb_test[0])*(bb_test[3]-bb_test[1]) +
               (bb_gt[2]-bb_gt[0])*(bb_gt[3]-bb_gt[1]) - wh)
-    return(o)
+    return o
 
 class KalmanBoxTracker:
     count = 0
-
     def __init__(self, bbox):
         self.kf = KalmanFilter(dim_x=7, dim_z=4)
         self.kf.F = np.array([[1,0,0,0,1,0,0],
@@ -85,49 +82,51 @@ class Sort:
         self.frame_count += 1
         trks = np.zeros((len(self.trackers), 5))
         to_del = []
-        ret = []
-        for t, trk in enumerate(trks):
-            pos = self.trackers[t].predict()[0]
-            trk[:] = [pos[0], pos[1], pos[2], pos[3], 0]
-            if np.any(np.isnan(pos)):
+
+        for t in range(len(self.trackers)):
+            pos = self.trackers[t].predict()
+            if pos.shape[0] < 4 or np.any(np.isnan(pos)):
                 to_del.append(t)
+                continue
+            trks[t, :] = [pos[0], pos[1], pos[2], pos[3], 0]
+
         trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
         for t in reversed(to_del):
             self.trackers.pop(t)
 
         matched, unmatched_dets, unmatched_trks = associate_detections_to_trackers(dets, trks, self.iou_threshold)
+
         for t, trk in enumerate(self.trackers):
             if t not in unmatched_trks:
-                trk.update(dets[matched[np.where(matched[:,1]==t)[0],0][0], :4])
+                d = matched[np.where(matched[:, 1] == t)[0], 0][0]
+                trk.update(dets[d, :4])
 
         for i in unmatched_dets:
-            trk = KalmanBoxTracker(dets[i,:4])
-            self.trackers.append(trk)
+            self.trackers.append(KalmanBoxTracker(dets[i, :4]))
 
-        i = len(self.trackers)
-        for trk in reversed(self.trackers):
+        ret = []
+        for trk in self.trackers:
             d = trk.get_state()[0]
             if (trk.time_since_update < 1) and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits):
                 ret.append(np.concatenate((d, [trk.id])).reshape(1, -1))
-            i -= 1
-            if trk.time_since_update > self.max_age:
-                self.trackers.pop(i)
 
-        if len(ret) > 0:
-            return np.concatenate(ret)
-        return np.empty((0, 5))
+        return np.concatenate(ret) if len(ret) > 0 else np.empty((0, 5))
 
 def associate_detections_to_trackers(dets, trks, iou_threshold=0.3):
     if len(trks) == 0:
         return np.empty((0, 2), dtype=int), np.arange(len(dets)), np.empty((0,), dtype=int)
+
     iou_matrix = np.zeros((len(dets), len(trks)), dtype=np.float32)
     for d in range(len(dets)):
         for t in range(len(trks)):
             iou_matrix[d, t] = iou(dets[d], trks[t])
+
     matched_indices = linear_sum_assignment(-iou_matrix)
     matched_indices = np.array(list(zip(*matched_indices)))
+
     unmatched_dets = [d for d in range(len(dets)) if d not in matched_indices[:, 0]]
     unmatched_trks = [t for t in range(len(trks)) if t not in matched_indices[:, 1]]
+
     matches = []
     for m in matched_indices:
         if iou_matrix[m[0], m[1]] < iou_threshold:
@@ -135,13 +134,10 @@ def associate_detections_to_trackers(dets, trks, iou_threshold=0.3):
             unmatched_trks.append(m[1])
         else:
             matches.append(m.reshape(1, 2))
-    if len(matches) == 0:
-        matches = np.empty((0, 2), dtype=int)
-    else:
-        matches = np.concatenate(matches, axis=0)
-    return matches, np.array(unmatched_dets), np.array(unmatched_trks)
 
-# ------------------------ Sportact AI Logic ------------------------
+    return np.concatenate(matches) if matches else np.empty((0, 2), dtype=int), np.array(unmatched_dets), np.array(unmatched_trks)
+
+# -------------------- Sportact AI Logic --------------------
 
 model = YOLO("yolov8n.pt")
 tracker = Sort()
@@ -150,22 +146,20 @@ player_trails = defaultdict(lambda: deque(maxlen=2))
 player_stats = defaultdict(lambda: {"distance": 0.0})
 team_colours = {}
 
-def estimate_speed_and_distance(prev, curr, fps):
+def estimate_speed_and_distance(prev, curr):
     if not prev or not curr:
         return 0.0, 0.0
     dx, dy = curr[0] - prev[0], curr[1] - prev[1]
-    pixel_dist = math.sqrt(dx**2 + dy**2)
-    meters = pixel_dist / 50.0
+    px_dist = math.sqrt(dx**2 + dy**2)
+    meters = px_dist / 50.0
     if meters > 5:
         return 0.0, 0.0
-    speed_kph = meters * fps * 3.6
-    return min(round(speed_kph, 2), 40.0), round(meters, 2)
+    return min(round(meters * fps * 3.6, 2), 40.0), round(meters, 2)
 
 def get_dominant_colour(crop):
     crop = cv2.resize(crop, (30, 30))
     data = crop.reshape((-1, 3))
-    kmeans = KMeans(n_clusters=1).fit(data)
-    return tuple(map(int, kmeans.cluster_centers_[0]))
+    return tuple(map(int, KMeans(n_clusters=1).fit(data).cluster_centers_[0]))
 
 def assign_team_color(rgb):
     if rgb[0] > rgb[1] and rgb[0] > rgb[2]:
@@ -186,28 +180,19 @@ def analyse_video(input_path, output_path):
         ret, frame = cap.read()
         if not ret:
             break
+
         results = model(frame)[0]
-        detections = []
-
-        for det in results.boxes:
-            x1, y1, x2, y2 = map(int, det.xyxy[0])
-            cls = int(det.cls[0])
-            if cls == 0:
-                conf = float(det.conf[0])
-                detections.append([x1, y1, x2, y2, conf])
-
+        detections = [list(map(float, det.xyxy[0])) + [float(det.conf[0])] for det in results.boxes if int(det.cls[0]) == 0]
         tracks = tracker.update(np.array(detections))
 
-        for track in tracks:
-            x1, y1, x2, y2, track_id = map(int, track)
+        for tr in tracks:
+            x1, y1, x2, y2, track_id = map(int, tr)
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
             feet = (cx, int(y2))
+
             player_trails[track_id].append(feet)
-            if len(player_trails[track_id]) == 2:
-                speed, dist = estimate_speed_and_distance(player_trails[track_id][0], player_trails[track_id][1], fps)
-                player_stats[track_id]["distance"] += dist
-            else:
-                speed = 0.0
+            speed, dist = estimate_speed_and_distance(*player_trails[track_id]) if len(player_trails[track_id]) == 2 else (0.0, 0.0)
+            player_stats[track_id]["distance"] += dist
 
             crop = frame[y1:y2, x1:x2]
             if track_id not in team_colours and crop.size > 0:
@@ -224,12 +209,14 @@ def analyse_video(input_path, output_path):
     cap.release()
     out.release()
 
-# ------------------------ Streamlit UI ------------------------
+# -------------------- Streamlit UI --------------------
 
-uploaded_file = st.file_uploader("🎥 Upload your match video (.mp4)", type=["mp4"])
+st.set_page_config(page_title="Sportact Final", layout="wide")
+st.title("⚽ Sportact AI – Final Analysis")
+
+uploaded_file = st.file_uploader("🎥 Upload match video (.mp4)", type=["mp4"])
 if uploaded_file:
     st.video(uploaded_file)
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
         temp_input.write(uploaded_file.read())
         input_path = temp_input.name
@@ -237,10 +224,10 @@ if uploaded_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
         output_path = temp_output.name
 
-    with st.spinner("🎯 Analysing with accurate IDs, speed, distance..."):
+    with st.spinner("🎯 Analysing with tracking, speed & distance..."):
         analyse_video(input_path, output_path)
 
-    st.success("✅ Done! Here’s your final elite-level output:")
+    st.success("✅ Done! Here’s your match analysis:")
     st.video(output_path)
 
     with open(output_path, "rb") as f:
