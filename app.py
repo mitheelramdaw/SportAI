@@ -7,12 +7,11 @@ import tempfile
 from collections import deque, defaultdict
 from sklearn.cluster import KMeans
 from ultralytics import YOLO
-from sort import Sort
+from sort.sort import Sort
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.animation import FuncAnimation
 from io import BytesIO
-from sort.sort import Sort
 
 
 # Streamlit setup
