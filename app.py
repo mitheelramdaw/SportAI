@@ -7,10 +7,13 @@ import tempfile
 from collections import deque, defaultdict
 from sklearn.cluster import KMeans
 from ultralytics import YOLO
+from sort import Sort  # NEW: Tracker
 
+# Streamlit setup
 st.set_page_config(page_title="Sportact Pro AI", layout="wide")
 st.title("🏟️ Sportact AI – Full In-Game Analysis")
 
+# Init models
 mp_pose = mp.solutions.pose
 model = YOLO("yolov8n.pt")
 
@@ -18,7 +21,7 @@ model = YOLO("yolov8n.pt")
 player_history = {}
 player_stats = defaultdict(lambda: {"path": [], "distance": 0})
 
-# Get dominant jersey colour
+# Helper: Get dominant jersey color
 def get_dominant_colour(crop):
     crop = cv2.resize(crop, (30, 30))
     data = crop.reshape((-1, 3))
@@ -26,12 +29,13 @@ def get_dominant_colour(crop):
     color = kmeans.cluster_centers_[0]
     return tuple(map(int, color))
 
-# Heatmap visualisation
+# Helper: Heatmap overlay
 def draw_heatmap(frame, heatmap):
     heatmap_norm = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX)
     heatmap_img = cv2.applyColorMap(heatmap_norm.astype(np.uint8), cv2.COLORMAP_JET)
     return cv2.addWeighted(frame, 0.6, heatmap_img, 0.4, 0)
 
+# Helper: Draw green feet circle using pose
 def draw_feet_circle(frame, landmarks, thresh=0.5):
     try:
         l = landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value]
@@ -43,6 +47,7 @@ def draw_feet_circle(frame, landmarks, thresh=0.5):
     except:
         pass
 
+# Main analysis logic
 def analyse_video(input_path, output_path):
     cap = cv2.VideoCapture(input_path)
     w, h = int(cap.get(3)), int(cap.get(4))
@@ -50,50 +55,57 @@ def analyse_video(input_path, output_path):
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
     heatmap = np.zeros((h, w), dtype=np.float32)
 
+    tracker = Sort(max_age=10, min_hits=3, iou_threshold=0.3)
+
     with mp_pose.Pose(static_image_mode=False, model_complexity=1) as pose:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+
             results = model(frame)[0]
+            detections = []
+
+            for det in results.boxes:
+                x1, y1, x2, y2 = map(int, det.xyxy[0])
+                cls = int(det.cls[0])
+                if cls == 0:
+                    conf = float(det.conf[0])
+                    detections.append([x1, y1, x2, y2, conf])
+
+            tracks = tracker.update(np.array(detections))
+
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pose_results = pose.process(rgb)
 
-            for i, det in enumerate(results.boxes):
-                x1, y1, x2, y2 = map(int, det.xyxy[0])
-                cls = int(det.cls[0])
-                if cls != 0: continue
-
-                pid = i
+            for track in tracks:
+                x1, y1, x2, y2, track_id = map(int, track)
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 center = (cx, cy)
 
-                # Track movement for stats
-                player_stats[pid]["path"].append(center)
-                if len(player_stats[pid]["path"]) > 1:
-                    d = np.linalg.norm(np.array(center) - np.array(player_stats[pid]["path"][-2]))
-                    player_stats[pid]["distance"] += d
+                # Stats tracking
+                player_stats[track_id]["path"].append(center)
+                if len(player_stats[track_id]["path"]) > 1:
+                    d = np.linalg.norm(np.array(center) - np.array(player_stats[track_id]["path"][-2]))
+                    player_stats[track_id]["distance"] += d
 
-                # Arrow
-                if pid not in player_history:
-                    player_history[pid] = deque(maxlen=5)
-                player_history[pid].append(center)
-                if len(player_history[pid]) >= 2:
-                    prev = player_history[pid][-2]
+                # Movement arrow
+                if track_id not in player_history:
+                    player_history[track_id] = deque(maxlen=5)
+                player_history[track_id].append(center)
+                if len(player_history[track_id]) >= 2:
+                    prev = player_history[track_id][-2]
                     cv2.arrowedLine(frame, prev, center, (0, 255, 255), 3, tipLength=0.4)
 
-                # Dominant colour from torso crop
+                # Jersey color
                 crop = frame[y1:y2, x1:x2]
-                if crop.size > 0:
-                    jersey_color = get_dominant_colour(crop)
-                else:
-                    jersey_color = (255, 255, 255)
+                jersey_color = get_dominant_colour(crop) if crop.size > 0 else (255, 255, 255)
 
-                # Draw player box and label
+                # Draw box and label
                 cv2.rectangle(frame, (x1, y1), (x2, y2), jersey_color, 2)
-                cv2.putText(frame, f"Player {pid}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, jersey_color, 2)
+                cv2.putText(frame, f"Player {track_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, jersey_color, 2)
 
-                # Update heatmap
+                # Heatmap update
                 cv2.circle(heatmap, center, 15, 1, -1)
 
             if pose_results.pose_landmarks:
@@ -105,7 +117,7 @@ def analyse_video(input_path, output_path):
     cap.release()
     out.release()
 
-# UI
+# Streamlit UI
 uploaded_file = st.file_uploader("Upload Match Video (.mp4)", type=["mp4"])
 
 if uploaded_file:
@@ -129,5 +141,5 @@ if uploaded_file:
 
     st.markdown("### 📊 Player Stats")
     for pid, stats in player_stats.items():
-        dist_m = stats["distance"] / 50  # approx conversion: pixels to metres
-        st.write(f"👤 Player {pid}: Distance covered ~ **{dist_m:.2f} m**")
+        dist_m = stats["distance"] / 50  # Rough pixel-to-metre conversion
+        st.write(f"👤 Player {int(pid)}: Distance covered ~ **{dist_m:.2f} m**")
