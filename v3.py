@@ -9,7 +9,7 @@ import math
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
-# -------------------- SORT Tracker Implementation --------------------
+# ------------------ SORT Tracker ------------------
 
 def iou(bb_test, bb_gt):
     xx1 = np.maximum(bb_test[0], bb_gt[0])
@@ -19,7 +19,7 @@ def iou(bb_test, bb_gt):
     w = np.maximum(0., xx2 - xx1)
     h = np.maximum(0., yy2 - yy1)
     wh = w * h
-    o = wh / ((bb_test[2]-bb_test[0])*(bb_test[3]-bb_test[1]) +
+    o = wh / ((bb_test[2]-bb_test[0])*(bb_test[3]-bb_test[1]) + 
               (bb_gt[2]-bb_gt[0])*(bb_gt[3]-bb_gt[1]) - wh)
     return o
 
@@ -82,9 +82,8 @@ class Sort:
         self.frame_count += 1
         trks = np.zeros((len(self.trackers), 5))
         to_del = []
-
         for t in range(len(self.trackers)):
-            pos = self.trackers[t].predict()
+            pos = self.trackers[t].predict().flatten()
             if pos.shape[0] < 4 or np.any(np.isnan(pos)):
                 to_del.append(t)
                 continue
@@ -115,18 +114,14 @@ class Sort:
 def associate_detections_to_trackers(dets, trks, iou_threshold=0.3):
     if len(trks) == 0:
         return np.empty((0, 2), dtype=int), np.arange(len(dets)), np.empty((0,), dtype=int)
-
     iou_matrix = np.zeros((len(dets), len(trks)), dtype=np.float32)
     for d in range(len(dets)):
         for t in range(len(trks)):
             iou_matrix[d, t] = iou(dets[d], trks[t])
-
     matched_indices = linear_sum_assignment(-iou_matrix)
     matched_indices = np.array(list(zip(*matched_indices)))
-
     unmatched_dets = [d for d in range(len(dets)) if d not in matched_indices[:, 0]]
     unmatched_trks = [t for t in range(len(trks)) if t not in matched_indices[:, 1]]
-
     matches = []
     for m in matched_indices:
         if iou_matrix[m[0], m[1]] < iou_threshold:
@@ -134,10 +129,9 @@ def associate_detections_to_trackers(dets, trks, iou_threshold=0.3):
             unmatched_trks.append(m[1])
         else:
             matches.append(m.reshape(1, 2))
-
     return np.concatenate(matches) if matches else np.empty((0, 2), dtype=int), np.array(unmatched_dets), np.array(unmatched_trks)
 
-# -------------------- Sportact AI Logic --------------------
+# ------------------ Sportact AI Processing ------------------
 
 model = YOLO("yolov8n.pt")
 tracker = Sort()
@@ -152,7 +146,7 @@ def estimate_speed_and_distance(prev, curr):
     dx, dy = curr[0] - prev[0], curr[1] - prev[1]
     px_dist = math.sqrt(dx**2 + dy**2)
     meters = px_dist / 50.0
-    if meters > 5:
+    if meters > 5:  # jump too far
         return 0.0, 0.0
     return min(round(meters * fps * 3.6, 2), 40.0), round(meters, 2)
 
@@ -178,9 +172,7 @@ def analyse_video(input_path, output_path):
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
-            break
-
+        if not ret: break
         results = model(frame)[0]
         detections = [list(map(float, det.xyxy[0])) + [float(det.conf[0])] for det in results.boxes if int(det.cls[0]) == 0]
         tracks = tracker.update(np.array(detections))
@@ -189,7 +181,6 @@ def analyse_video(input_path, output_path):
             x1, y1, x2, y2, track_id = map(int, tr)
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
             feet = (cx, int(y2))
-
             player_trails[track_id].append(feet)
             speed, dist = estimate_speed_and_distance(*player_trails[track_id]) if len(player_trails[track_id]) == 2 else (0.0, 0.0)
             player_stats[track_id]["distance"] += dist
@@ -197,8 +188,8 @@ def analyse_video(input_path, output_path):
             crop = frame[y1:y2, x1:x2]
             if track_id not in team_colours and crop.size > 0:
                 team_colours[track_id] = assign_team_color(get_dominant_colour(crop))
-
             color = team_colours.get(track_id, (200, 200, 200))
+
             cv2.circle(frame, feet, 18, color, 2)
             cv2.putText(frame, f"{track_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
             cv2.putText(frame, f"{speed:.1f} km/h", (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
@@ -209,10 +200,10 @@ def analyse_video(input_path, output_path):
     cap.release()
     out.release()
 
-# -------------------- Streamlit UI --------------------
+# ------------------ Streamlit UI ------------------
 
-st.set_page_config(page_title="Sportact Final", layout="wide")
-st.title("⚽ Sportact AI – Final Analysis")
+st.set_page_config(page_title="Sportact AI", layout="wide")
+st.title("🏟️ Sportact AI – Final Analysis with Stable IDs")
 
 uploaded_file = st.file_uploader("🎥 Upload match video (.mp4)", type=["mp4"])
 if uploaded_file:
@@ -220,15 +211,11 @@ if uploaded_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
         temp_input.write(uploaded_file.read())
         input_path = temp_input.name
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
         output_path = temp_output.name
-
-    with st.spinner("🎯 Analysing with tracking, speed & distance..."):
+    with st.spinner("🎯 Analysing players, tracking IDs, speed, and distance..."):
         analyse_video(input_path, output_path)
-
-    st.success("✅ Done! Here’s your match analysis:")
+    st.success("✅ Done! See your enhanced analysis:")
     st.video(output_path)
-
     with open(output_path, "rb") as f:
-        st.download_button("📥 Download", f, file_name="sportact_final_analysis.mp4", mime="video/mp4")
+        st.download_button("📥 Download Analysed Video", f, file_name="sportact_analysis.mp4", mime="video/mp4")
