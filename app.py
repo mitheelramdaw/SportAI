@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.animation import FuncAnimation
 from io import BytesIO
+from sort.sort import Sort
+
 
 # Streamlit setup
 st.set_page_config(page_title="Sportact Pro AI", layout="wide")
